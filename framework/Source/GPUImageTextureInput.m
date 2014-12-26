@@ -13,13 +13,14 @@
     }
 
     runSynchronouslyOnVideoProcessingQueue(^{
-        [GPUImageOpenGLESContext useImageProcessingContext];
-
-        [self deleteOutputTexture];
+        [GPUImageContext useImageProcessingContext];
     });
     
-    outputTexture = newInputTexture;
     textureSize = newTextureSize;
+
+    runSynchronouslyOnVideoProcessingQueue(^{
+        outputFramebuffer = [[GPUImageFramebuffer alloc] initWithSize:newTextureSize overriddenTexture:newInputTexture];
+    });
     
     return self;
 }
@@ -29,14 +30,14 @@
 
 - (void)processTextureWithFrameTime:(CMTime)frameTime;
 {
-    runSynchronouslyOnVideoProcessingQueue(^{
-//    dispatch_async([GPUImageOpenGLESContext sharedOpenGLESQueue], ^{
+    runAsynchronouslyOnVideoProcessingQueue(^{
         for (id<GPUImageInput> currentTarget in targets)
         {
             NSInteger indexOfObject = [targets indexOfObject:currentTarget];
             NSInteger targetTextureIndex = [[targetTextureIndices objectAtIndex:indexOfObject] integerValue];
             
             [currentTarget setInputSize:textureSize atIndex:targetTextureIndex];
+            [currentTarget setInputFramebuffer:outputFramebuffer atIndex:targetTextureIndex];
             [currentTarget newFrameReadyAtTime:frameTime atIndex:targetTextureIndex];
         }
     });

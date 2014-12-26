@@ -15,7 +15,7 @@ NSString *const kGPUImageTwoInputTextureVertexShaderString = SHADER_STRING
      textureCoordinate = inputTextureCoordinate.xy;
      textureCoordinate2 = inputTextureCoordinate2.xy;
  }
- );
+);
 
 
 @implementation GPUImageTwoInputFilter
@@ -55,7 +55,7 @@ NSString *const kGPUImageTwoInputTextureVertexShaderString = SHADER_STRING
     secondFrameTime = kCMTimeInvalid;
         
     runSynchronouslyOnVideoProcessingQueue(^{
-        [GPUImageOpenGLESContext useImageProcessingContext];
+        [GPUImageContext useImageProcessingContext];
         filterSecondTextureCoordinateAttribute = [filterProgram attributeIndex:@"inputTextureCoordinate2"];
         
         filterInputTextureUniform2 = [filterProgram uniformIndex:@"inputImageTexture2"]; // This does assume a name of "inputImageTexture2" for second input texture in the fragment shader
@@ -84,34 +84,48 @@ NSString *const kGPUImageTwoInputTextureVertexShaderString = SHADER_STRING
 #pragma mark -
 #pragma mark Rendering
 
-- (void)renderToTextureWithVertices:(const GLfloat *)vertices textureCoordinates:(const GLfloat *)textureCoordinates sourceTexture:(GLuint)sourceTexture;
+- (void)renderToTextureWithVertices:(const GLfloat *)vertices textureCoordinates:(const GLfloat *)textureCoordinates;
 {
     if (self.preventRendering)
     {
+        [firstInputFramebuffer unlock];
+        [secondInputFramebuffer unlock];
         return;
     }
     
-    [GPUImageOpenGLESContext setActiveShaderProgram:filterProgram];
-    [self setUniformsForProgramAtIndex:0];
+    [GPUImageContext setActiveShaderProgram:filterProgram];
+    outputFramebuffer = [[GPUImageContext sharedFramebufferCache] fetchFramebufferForSize:[self sizeOfFBO] textureOptions:self.outputTextureOptions onlyTexture:NO];
+    [outputFramebuffer activateFramebuffer];
+    if (usingNextFrameForImageCapture)
+    {
+        [outputFramebuffer lock];
+    }
 
-    [self setFilterFBO];
-    
+    [self setUniformsForProgramAtIndex:0];
+        
     glClearColor(backgroundColorRed, backgroundColorGreen, backgroundColorBlue, backgroundColorAlpha);
     glClear(GL_COLOR_BUFFER_BIT);
     
 	glActiveTexture(GL_TEXTURE2);
-	glBindTexture(GL_TEXTURE_2D, sourceTexture);
+	glBindTexture(GL_TEXTURE_2D, [firstInputFramebuffer texture]);
 	glUniform1i(filterInputTextureUniform, 2);	
     
     glActiveTexture(GL_TEXTURE3);
-    glBindTexture(GL_TEXTURE_2D, filterSourceTexture2);                
+    glBindTexture(GL_TEXTURE_2D, [secondInputFramebuffer texture]);
     glUniform1i(filterInputTextureUniform2, 3);
     
     glVertexAttribPointer(filterPositionAttribute, 2, GL_FLOAT, 0, 0, vertices);
 	glVertexAttribPointer(filterTextureCoordinateAttribute, 2, GL_FLOAT, 0, 0, textureCoordinates);
     glVertexAttribPointer(filterSecondTextureCoordinateAttribute, 2, GL_FLOAT, 0, 0, [[self class] textureCoordinatesForRotation:inputRotation2]);
     
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);    
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    [firstInputFramebuffer unlock];
+    [secondInputFramebuffer unlock];
+    if (usingNextFrameForImageCapture)
+    {
+        dispatch_semaphore_signal(imageCaptureSemaphore);
+    }
 }
 
 #pragma mark -
@@ -129,16 +143,18 @@ NSString *const kGPUImageTwoInputTextureVertexShaderString = SHADER_STRING
     }
 }
 
-- (void)setInputTexture:(GLuint)newInputTexture atIndex:(NSInteger)textureIndex;
+- (void)setInputFramebuffer:(GPUImageFramebuffer *)newInputFramebuffer atIndex:(NSInteger)textureIndex;
 {
     if (textureIndex == 0)
     {
-        filterSourceTexture = newInputTexture;
+        firstInputFramebuffer = newInputFramebuffer;
         hasSetFirstTexture = YES;
+        [firstInputFramebuffer lock];
     }
     else
     {
-        filterSourceTexture2 = newInputTexture;
+        secondInputFramebuffer = newInputFramebuffer;
+        [secondInputFramebuffer lock];
     }
 }
 
@@ -223,7 +239,7 @@ NSString *const kGPUImageTwoInputTextureVertexShaderString = SHADER_STRING
         secondFrameTime = frameTime;
         if (firstFrameCheckDisabled)
         {
-            hasReceivedSecondFrame = YES;
+            hasReceivedFirstFrame = YES;
         }
 
         if (!CMTIME_IS_INDEFINITE(frameTime))
@@ -238,11 +254,11 @@ NSString *const kGPUImageTwoInputTextureVertexShaderString = SHADER_STRING
     // || (hasReceivedFirstFrame && secondFrameCheckDisabled) || (hasReceivedSecondFrame && firstFrameCheckDisabled)
     if ((hasReceivedFirstFrame && hasReceivedSecondFrame) || updatedMovieFrameOppositeStillImage)
     {
-        [super newFrameReadyAtTime:frameTime atIndex:0];
+        CMTime passOnFrameTime = (!CMTIME_IS_INDEFINITE(firstFrameTime)) ? firstFrameTime : secondFrameTime;
+        [super newFrameReadyAtTime:passOnFrameTime atIndex:0]; // Bugfix when trying to record: always use time from first input (unless indefinite, in which case use the second input)
         hasReceivedFirstFrame = NO;
         hasReceivedSecondFrame = NO;
     }
 }
-
 
 @end

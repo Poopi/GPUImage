@@ -2,9 +2,9 @@
 #import "GPUImageGaussianBlurFilter.h"
 #import "GPUImageXYDerivativeFilter.h"
 #import "GPUImageGrayscaleFilter.h"
-#import "GPUImageFastBlurFilter.h"
-#import "GPUImageNonMaximumSuppressionFilter.h"
+#import "GPUImageThresholdedNonMaximumSuppressionFilter.h"
 #import "GPUImageColorPackingFilter.h"
+#import "GPUImageGaussianBlurFilter.h"
 
 @interface GPUImageHarrisCornerDetectionFilter()
 
@@ -17,6 +17,7 @@
 
 @implementation GPUImageHarrisCornerDetectionFilter
 
+#if TARGET_IPHONE_SIMULATOR || TARGET_OS_IPHONE
 NSString *const kGPUImageHarrisCornerDetectionFragmentShaderString = SHADER_STRING
 ( 
  varying highp vec2 textureCoordinate;
@@ -40,25 +41,33 @@ NSString *const kGPUImageHarrisCornerDetectionFragmentShaderString = SHADER_STRI
      gl_FragColor = vec4(vec3(cornerness * sensitivity), 1.0);
  }
 );
-
-NSString *const kGPUImageSimpleThresholdFragmentShaderString = SHADER_STRING
-( 
- varying highp vec2 textureCoordinate;
+#else
+NSString *const kGPUImageHarrisCornerDetectionFragmentShaderString = SHADER_STRING
+(
+ varying vec2 textureCoordinate;
  
  uniform sampler2D inputImageTexture;
- uniform lowp float threshold;
+ uniform float sensitivity;
+ 
+ const float harrisConstant = 0.04;
  
  void main()
  {
-     lowp float intensity = texture2D(inputImageTexture, textureCoordinate).r;
-
-     lowp float thresholdValue = step(threshold, intensity);
+     vec3 derivativeElements = texture2D(inputImageTexture, textureCoordinate).rgb;
      
-     gl_FragColor = vec4(thresholdValue, 0.0, 0.0, 1.0);
+     float derivativeSum = derivativeElements.x + derivativeElements.y;
+     
+     float zElement = (derivativeElements.z * 2.0) - 1.0;
+     
+     // R = Ix^2 * Iy^2 - Ixy * Ixy - k * (Ix^2 + Iy^2)^2
+     float cornerness = derivativeElements.x * derivativeElements.y - (zElement * zElement) - harrisConstant * derivativeSum * derivativeSum;
+     
+     gl_FragColor = vec4(vec3(cornerness * sensitivity), 1.0);
  }
 );
+#endif
 
-@synthesize blurSize;
+@synthesize blurRadiusInPixels;
 @synthesize cornersDetectedBlock;
 @synthesize sensitivity = _sensitivity;
 @synthesize threshold = _threshold;
@@ -102,7 +111,7 @@ NSString *const kGPUImageSimpleThresholdFragmentShaderString = SHADER_STRING
 #endif
 
     // Second pass: blur the derivative
-    blurFilter = [[GPUImageFastBlurFilter alloc] init];
+    blurFilter = [[GPUImageGaussianBlurFilter alloc] init];
     [self addFilter:blurFilter];
     
 #ifdef DEBUGFEATUREDETECTION
@@ -125,38 +134,26 @@ NSString *const kGPUImageSimpleThresholdFragmentShaderString = SHADER_STRING
     }];
 #endif
 
-    // Fourth pass: apply non-maximum suppression to find the local maxima
-    nonMaximumSuppressionFilter = [[GPUImageNonMaximumSuppressionFilter alloc] init];
+    // Fourth pass: apply non-maximum suppression and thresholding to find the local maxima
+    nonMaximumSuppressionFilter = [[GPUImageThresholdedNonMaximumSuppressionFilter alloc] init];
     [self addFilter:nonMaximumSuppressionFilter];
-
-#ifdef DEBUGFEATUREDETECTION
-    weakFilter = nonMaximumSuppressionFilter;
-    [nonMaximumSuppressionFilter setFrameProcessingCompletionBlock:^(GPUImageOutput *filter, CMTime frameTime){
-        UIImage *intermediateImage = [weakFilter imageFromCurrentlyProcessedOutput];
-        [weakIntermediateImages addObject:intermediateImage];
-    }];
-#endif
-
-    // Fifth pass: threshold the result
-    simpleThresholdFilter = [[GPUImageFilter alloc] initWithFragmentShaderFromString:kGPUImageSimpleThresholdFragmentShaderString];
-    [self addFilter:simpleThresholdFilter];
 
     __unsafe_unretained GPUImageHarrisCornerDetectionFilter *weakSelf = self;
 #ifdef DEBUGFEATUREDETECTION
-    weakFilter = simpleThresholdFilter;
-    [simpleThresholdFilter setFrameProcessingCompletionBlock:^(GPUImageOutput *filter, CMTime frameTime){
+    weakFilter = nonMaximumSuppressionFilter;
+    [nonMaximumSuppressionFilter setFrameProcessingCompletionBlock:^(GPUImageOutput *filter, CMTime frameTime){
         UIImage *intermediateImage = [weakFilter imageFromCurrentlyProcessedOutput];
         [weakIntermediateImages addObject:intermediateImage];
         
         [weakSelf extractCornerLocationsFromImageAtFrameTime:frameTime];
     }];
 #else
-    [simpleThresholdFilter setFrameProcessingCompletionBlock:^(GPUImageOutput *filter, CMTime frameTime) {
+    [nonMaximumSuppressionFilter setFrameProcessingCompletionBlock:^(GPUImageOutput *filter, CMTime frameTime) {
         [weakSelf extractCornerLocationsFromImageAtFrameTime:frameTime];
     }];
 #endif
-
-    // Sixth pass: compress the thresholded points into the RGBA channels
+    
+// Sixth pass: compress the thresholded points into the RGBA channels
 //    colorPackingFilter = [[GPUImageColorPackingFilter alloc] init];
 //    [self addFilter:colorPackingFilter];
 //
@@ -182,14 +179,13 @@ NSString *const kGPUImageSimpleThresholdFragmentShaderString = SHADER_STRING
     [derivativeFilter addTarget:blurFilter];    
     [blurFilter addTarget:harrisCornerDetectionFilter];
     [harrisCornerDetectionFilter addTarget:nonMaximumSuppressionFilter];
-    [nonMaximumSuppressionFilter addTarget:simpleThresholdFilter];
 //    [simpleThresholdFilter addTarget:colorPackingFilter];
     
     self.initialFilters = [NSArray arrayWithObjects:derivativeFilter, nil];
 //    self.terminalFilter = colorPackingFilter;
-    self.terminalFilter = simpleThresholdFilter;
+    self.terminalFilter = nonMaximumSuppressionFilter;
     
-    self.blurSize = 1.0;
+    self.blurRadiusInPixels = 2.0;
     self.sensitivity = 5.0;
     self.threshold = 0.20;
     
@@ -198,7 +194,8 @@ NSString *const kGPUImageSimpleThresholdFragmentShaderString = SHADER_STRING
      
 - (void)dealloc;
 {
-    free(rawImagePixels);    
+    free(rawImagePixels);
+    free(cornersArray);
 }
 
 #pragma mark -
@@ -206,18 +203,20 @@ NSString *const kGPUImageSimpleThresholdFragmentShaderString = SHADER_STRING
 
 - (void)extractCornerLocationsFromImageAtFrameTime:(CMTime)frameTime;
 {
+    // we need a normal color texture for this filter
+    NSAssert(self.outputTextureOptions.internalFormat == GL_RGBA, @"The output texture format for this filter must be GL_RGBA.");
+    NSAssert(self.outputTextureOptions.type == GL_UNSIGNED_BYTE, @"The type of the output texture of this filter must be GL_UNSIGNED_BYTE.");
 
     NSUInteger numberOfCorners = 0;
-    CGSize imageSize = simpleThresholdFilter.outputFrameSize;
+    CGSize imageSize = nonMaximumSuppressionFilter.outputFrameSize;
     
     unsigned int imageByteSize = imageSize.width * imageSize.height * 4;
     
     if (rawImagePixels == NULL)
     {
         rawImagePixels = (GLubyte *)malloc(imageByteSize);
-    }
-    
-    cornersArray = calloc(512 * 2, sizeof(GLfloat));
+        cornersArray = calloc(512 * 2, sizeof(GLfloat));
+    }    
     
     glReadPixels(0, 0, (int)imageSize.width, (int)imageSize.height, GL_RGBA, GL_UNSIGNED_BYTE, rawImagePixels);
 
@@ -230,7 +229,7 @@ NSString *const kGPUImageSimpleThresholdFragmentShaderString = SHADER_STRING
     while (currentByte < imageByteSize)
     {
         GLubyte colorByte = rawImagePixels[currentByte];
-            
+        
         if (colorByte > 0)
         {
             unsigned int xCoordinate = currentByte % imageWidth;
@@ -241,6 +240,7 @@ NSString *const kGPUImageSimpleThresholdFragmentShaderString = SHADER_STRING
             numberOfCorners++;
             
             numberOfCorners = MIN(numberOfCorners, 511);
+            cornerStorageIndex = MIN(cornerStorageIndex, 1021);
         }
         currentByte +=4;
     }
@@ -252,21 +252,25 @@ NSString *const kGPUImageSimpleThresholdFragmentShaderString = SHADER_STRING
     {
         cornersDetectedBlock(cornersArray, numberOfCorners, frameTime);
     }
-    
-    free(cornersArray);
+}
+
+- (BOOL)wantsMonochromeInput;
+{
+//    return YES;
+    return NO;
 }
 
 #pragma mark -
 #pragma mark Accessors
 
-- (void)setBlurSize:(CGFloat)newValue;
+- (void)setBlurRadiusInPixels:(CGFloat)newValue;
 {
-    blurFilter.blurSize = newValue;
+    blurFilter.blurRadiusInPixels = newValue;
 }
 
-- (CGFloat)blurSize;
+- (CGFloat)blurRadiusInPixels;
 {
-    return blurFilter.blurSize;
+    return blurFilter.blurRadiusInPixels;
 }
 
 - (void)setSensitivity:(CGFloat)newValue;
@@ -277,8 +281,12 @@ NSString *const kGPUImageSimpleThresholdFragmentShaderString = SHADER_STRING
 
 - (void)setThreshold:(CGFloat)newValue;
 {
-    _threshold = newValue;
-    [simpleThresholdFilter setFloat:newValue forUniformName:@"threshold"];
+    nonMaximumSuppressionFilter.threshold = newValue;
+}
+
+- (CGFloat)threshold;
+{
+    return nonMaximumSuppressionFilter.threshold;
 }
 
 @end

@@ -16,8 +16,6 @@
     
     filters = [[NSMutableArray alloc] init];
     
-    [self deleteOutputTexture];
-    
     return self;
 }
 
@@ -34,7 +32,7 @@
     return [filters objectAtIndex:filterIndex];
 }
 
-- (int)filterCount;
+- (NSUInteger)filterCount;
 {
     return [filters count];
 }
@@ -42,14 +40,14 @@
 #pragma mark -
 #pragma mark Still image processing
 
-- (CGImageRef)newCGImageFromCurrentlyProcessedOutputWithOrientation:(UIImageOrientation)imageOrientation;
+- (void)useNextFrameForImageCapture;
 {
-    return [self.terminalFilter newCGImageFromCurrentlyProcessedOutputWithOrientation:imageOrientation];
+    [self.terminalFilter useNextFrameForImageCapture];
 }
 
-- (void)prepareForImageCapture;
+- (CGImageRef)newCGImageFromCurrentlyProcessedOutput;
 {
-    [self.terminalFilter prepareForImageCapture];
+    return [self.terminalFilter newCGImageFromCurrentlyProcessedOutput];
 }
 
 #pragma mark -
@@ -99,11 +97,11 @@
     }
 }
 
-- (void)setInputTexture:(GLuint)newInputTexture atIndex:(NSInteger)textureIndex;
+- (void)setInputFramebuffer:(GPUImageFramebuffer *)newInputFramebuffer atIndex:(NSInteger)textureIndex;
 {
     for (GPUImageOutput<GPUImageInput> *currentFilter in _initialFilters)
     {
-        [currentFilter setInputTexture:newInputTexture atIndex:textureIndex];
+        [currentFilter setInputFramebuffer:newInputFramebuffer atIndex:textureIndex];
     }
 }
 
@@ -141,6 +139,13 @@
     }
 }
 
+- (void)forceProcessingAtSizeRespectingAspectRatio:(CGSize)frameSize;
+{
+    for (GPUImageOutput<GPUImageInput> *currentFilter in filters)
+    {
+        [currentFilter forceProcessingAtSizeRespectingAspectRatio:frameSize];
+    }
+}
 
 - (CGSize)maximumOutputSize;
 {
@@ -165,9 +170,33 @@
 
 - (void)endProcessing;
 {
+    if (!isEndProcessing)
+    {
+        isEndProcessing = YES;
+        
+        for (id<GPUImageInput> currentTarget in _initialFilters)
+        {
+            [currentTarget endProcessing];
+        }
+    }
+}
+
+- (BOOL)wantsMonochromeInput;
+{
+    BOOL allInputsWantMonochromeInput = YES;
     for (GPUImageOutput<GPUImageInput> *currentFilter in _initialFilters)
     {
-        [currentFilter endProcessing];
+        allInputsWantMonochromeInput = allInputsWantMonochromeInput && [currentFilter wantsMonochromeInput];
+    }
+    
+    return allInputsWantMonochromeInput;
+}
+
+- (void)setCurrentlyReceivingMonochromeInput:(BOOL)newValue;
+{
+    for (GPUImageOutput<GPUImageInput> *currentFilter in _initialFilters)
+    {
+        [currentFilter setCurrentlyReceivingMonochromeInput:newValue];
     }
 }
 

@@ -2,13 +2,13 @@
 
 @interface GPUImageTwoPassFilter : GPUImageFilter
 {
-    GLuint secondFilterOutputTexture;
+    GPUImageFramebuffer *secondOutputFramebuffer;
 
     GLProgram *secondFilterProgram;
     GLint secondFilterPositionAttribute, secondFilterTextureCoordinateAttribute;
     GLint secondFilterInputTextureUniform, secondFilterInputTextureUniform2;
     
-    GLuint secondFilterFramebuffer;
+    NSMutableDictionary *secondProgramUniformStateRestorationBlocks;
 }
 
 // Initialization and teardown
